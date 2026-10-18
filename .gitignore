@@ -1,0 +1,9 @@
+.vscode/
+build/
+*.log
+camera_cal/
+test_images/
+test_videos/
+examples/
+venv/
+my_tests/
