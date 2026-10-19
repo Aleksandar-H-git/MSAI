@@ -2,9 +2,13 @@ import os
 import cv2
 import numpy as np
 
-camera_cal_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_cal")
+project_dir = os.path.dirname(os.path.abspath(__file__))
+
+camera_cal_dir = os.path.join(project_dir, "camera_cal")
+test_images_dir = os.path.join(project_dir, "test_images")
+rnd_tests_output_dir = os.path.join(project_dir, "my_tests")
+
 image_list= []
-rnd_tests_output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "my_tests")
 
 def calibrate_camera(images):
     checkerboard_size = (9, 6)
@@ -22,7 +26,7 @@ def calibrate_camera(images):
     object_points = []
     image_points = []
 
-    for gray_image in images:
+    for file_name, gray_image in images:
         found, corners = cv2.findChessboardCorners(
             gray_image,
             checkerboard_size,
@@ -32,22 +36,19 @@ def calibrate_camera(images):
         if found:
             object_points.append(object_point_template)
             image_points.append(corners)
-            print("Checkerboard detected")
+            print(f"Checkerboard detected: {file_name}")
         else:
-            print("Checkerboard not detected")
+            print(f"Checkerboard NOT detected: {file_name}")
 
     if len(object_points) == 0:
-        raise RuntimeError(
-            "No checkerboard corners were detected. "
-            "Check checkerboard_size."
-        )
+        raise RuntimeError("No checkerboard corners were detected.")
 
     image_size = (
-        images[0].shape[1],  # width
-        images[0].shape[0]   # height
+        images[0][1].shape[1],
+        images[0][1].shape[0]
     )
 
-    success, camera_matrix, distortion_coeffs, _, _ = \
+    _, camera_matrix, distortion_coeffs, _, _ = \
         cv2.calibrateCamera(
             object_points,
             image_points,
@@ -56,8 +57,6 @@ def calibrate_camera(images):
             None
         )
 
-    if not success:
-        raise RuntimeError("Camera calibration failed")
 
     return camera_matrix, distortion_coeffs
 
@@ -71,34 +70,39 @@ def undistort_image(image, camera_matrix, distortion_coeffs):
     )
 
 def main():
-    print(camera_cal_dir)
     for file_name in os.listdir(camera_cal_dir):
-        if file_name.lower().endswith((".jpg",".jpeg")):
-                img_path = os.path.join(camera_cal_dir,file_name)
-        img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+        if file_name.lower().endswith((".jpg", ".jpeg")):
+            img_path = os.path.join(camera_cal_dir, file_name)
+            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
 
-        if img is not None:
-                image_list.append(img)
-
-    # TEST FOR VISUALLY CHECKING IF IMAGES GET READ AS GRAYSCALE, WRITES THEM IN my_tests/
-    #cnt = 1
-    #for img in image_list:        
-    #    cv2.imwrite(os.path.join(rnd_tests_output_dir, "img" + str(cnt) + ".jpg"), img)
-    #    cnt += 1
+            if img is not None:
+                image_list.append((file_name, img))
 
     camera_matrix, distortion_coeffs = calibrate_camera(image_list)
-    
+
+    # testing undistorting test1.jpg
+    test_image_path = os.path.join(
+    test_images_dir,
+    "test1.jpg"
+    )
+
+    img = cv2.imread(test_image_path)
+
     corrected = undistort_image(
-    image_list[2],
+    img,
     camera_matrix,
     distortion_coeffs
     )
-
     cv2.imwrite(
-        os.path.join(rnd_tests_output_dir, "undistorted.jpg"),
+        os.path.join(rnd_tests_output_dir, "undistorted_test1.jpg"),
         corrected
     )
-    return
+
+    print("Camera matrix:")
+    print(camera_matrix)
+
+    print("Distortion coefficients:")
+    print(distortion_coeffs)
 
 
 if __name__ == "__main__":
