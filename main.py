@@ -102,6 +102,41 @@ def create_binary_image(image):
 
     return combined_binary
 
+def perspective_transform(binary_image):
+    height, width = binary_image.shape[:2]
+
+    source_points = np.float32([
+        [0.43 * width, 0.65 * height],  # top-left
+        [0.58 * width, 0.65 * height],  # top-right
+        [0.95 * width, 0.95 * height],  # bottom-right
+        [0.10 * width, 0.95 * height]   # bottom-left
+    ])
+
+    destination_points = np.float32([
+        [0.25 * width, 0],       # top-left
+        [0.75 * width, 0],       # top-right
+        [0.75 * width, height],  # bottom-right
+        [0.25 * width, height]   # bottom-left
+    ])
+
+    transform_matrix = cv2.getPerspectiveTransform(
+        source_points,
+        destination_points
+    )
+    inverse_transform_matrix = cv2.getPerspectiveTransform(
+        destination_points,
+        source_points
+    )
+
+    warped = cv2.warpPerspective(
+        binary_image,
+        transform_matrix,
+        (width, height),
+        flags=cv2.INTER_NEAREST
+    )
+
+    return warped, transform_matrix, inverse_transform_matrix
+
 def main():
     for file_name in sorted(os.listdir(camera_cal_dir)):
         if file_name.lower().endswith((".jpg", ".jpeg")):
@@ -128,6 +163,7 @@ def main():
     )
 
     binary = create_binary_image(corrected)
+    warped_binary, _, inverse_transform_matrix = perspective_transform(binary)
 
     os.makedirs(rnd_tests_output_dir, exist_ok=True)
 
@@ -139,16 +175,23 @@ def main():
         rnd_tests_output_dir,
         "binary_example.jpg"
     )
+    warped_path = os.path.join(
+        rnd_tests_output_dir,
+        "warped_binary_example.jpg"
+    )
 
     if not cv2.imwrite(undistorted_path, corrected):
         raise RuntimeError(f"Could not save image: {undistorted_path}")
-
-    # Binary values are 0 or 1; multiply by 255 for a visible JPG.
+    # * 255 to see diff
     if not cv2.imwrite(binary_path, binary * 255):
         raise RuntimeError(f"Could not save image: {binary_path}")
 
+    if not cv2.imwrite(warped_path, warped_binary * 255):
+        raise RuntimeError(f"Could not save image: {warped_path}")
+
     print(f"Saved undistorted image: {undistorted_path}")
     print(f"Saved binary image: {binary_path}")
+    print(f"Saved warped binary image: {warped_path}")
 
     print("Camera matrix:")
     print(camera_matrix)
