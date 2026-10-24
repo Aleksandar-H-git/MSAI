@@ -213,6 +213,20 @@ def find_lane_pixels(binary_warped, number_of_windows=9, margin=80, min_pixels=5
 
     return left_x, left_y, right_x, right_y, debug_image
 
+def fit_lane_polynomials(left_x, left_y, right_x, right_y, image_height):
+    if len(left_x) < 300 or len(right_x) < 300:
+        raise ValueError(
+            f"Not enough lane pixels: left={len(left_x)}, right={len(right_x)}"
+        )
+
+    left_fit = np.polyfit(left_y, left_x, 2)
+    right_fit = np.polyfit(right_y, right_x, 2)
+    plot_y = np.linspace(0, image_height - 1, image_height)
+    left_fit_x = np.polyval(left_fit, plot_y)
+    right_fit_x = np.polyval(right_fit, plot_y)
+
+    return left_fit, right_fit, plot_y, left_fit_x, right_fit_x
+
 def main():
     for file_name in sorted(os.listdir(camera_cal_dir)):
         if file_name.lower().endswith((".jpg", ".jpeg")):
@@ -242,6 +256,39 @@ def main():
     warped_binary, _, inverse_transform_matrix = perspective_transform(binary)
     left_x, left_y, right_x, right_y, lane_pixels_image = \
         find_lane_pixels(warped_binary)
+    left_fit, right_fit, plot_y, left_fit_x, right_fit_x = \
+        fit_lane_polynomials(
+            left_x,
+            left_y,
+            right_x,
+            right_y,
+            warped_binary.shape[0]
+        )
+
+    fitted_lane_image = lane_pixels_image.copy()
+    image_width = fitted_lane_image.shape[1]
+    left_points = np.column_stack((
+        np.clip(left_fit_x, 0, image_width - 1),
+        plot_y
+    )).astype(np.int32)
+    right_points = np.column_stack((
+        np.clip(right_fit_x, 0, image_width - 1),
+        plot_y
+    )).astype(np.int32)
+    cv2.polylines(
+        fitted_lane_image,
+        [left_points],
+        False,
+        (0, 255, 255),
+        4
+    )
+    cv2.polylines(
+        fitted_lane_image,
+        [right_points],
+        False,
+        (0, 255, 255),
+        4
+    )
 
     os.makedirs(rnd_tests_output_dir, exist_ok=True)
 
@@ -261,6 +308,10 @@ def main():
         rnd_tests_output_dir,
         "lane_pixels_example.jpg"
     )
+    fitted_lane_path = os.path.join(
+        rnd_tests_output_dir,
+        "fitted_lane_example.jpg"
+    )
 
     if not cv2.imwrite(undistorted_path, corrected):
         raise RuntimeError(f"Could not save image: {undistorted_path}")
@@ -274,12 +325,18 @@ def main():
     if not cv2.imwrite(lane_pixels_path, lane_pixels_image):
         raise RuntimeError(f"Could not save image: {lane_pixels_path}")
 
+    if not cv2.imwrite(fitted_lane_path, fitted_lane_image):
+        raise RuntimeError(f"Could not save image: {fitted_lane_path}")
+
     print(f"Saved undistorted image: {undistorted_path}")
     print(f"Saved binary image: {binary_path}")
     print(f"Saved warped binary image: {warped_path}")
     print(f"Saved lane pixel image: {lane_pixels_path}")
+    print(f"Saved fitted lane image: {fitted_lane_path}")
     print(f"Left lane pixels found: {len(left_x)}")
     print(f"Right lane pixels found: {len(right_x)}")
+    print(f"Left polynomial: {left_fit}")
+    print(f"Right polynomial: {right_fit}")
 
     print("Camera matrix:")
     print(camera_matrix)
