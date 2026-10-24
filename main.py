@@ -6,6 +6,7 @@ project_dir = os.path.dirname(os.path.abspath(__file__))
 
 camera_cal_dir = os.path.join(project_dir, "camera_cal")
 test_images_dir = os.path.join(project_dir, "test_images")
+test_videos_dir = os.path.join(project_dir, "test_videos")
 rnd_tests_output_dir = os.path.join(project_dir, "my_tests")
 
 image_list= []
@@ -71,6 +72,8 @@ def undistort_image(image, camera_matrix, distortion_coeffs):
 
 def create_binary_image(image):
     hls = cv2.cvtColor(image, cv2.COLOR_BGR2HLS)
+    h_channel = hls[:, :, 0]
+    l_channel = hls[:, :, 1]
     s_channel = hls[:, :, 2]
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -90,10 +93,19 @@ def create_binary_image(image):
         (scaled_sobel >= 20)
     ] = 1
 
-    color_binary = np.zeros_like(gray, dtype=np.uint8)
-    color_binary[
+    white_mask = (
+        (l_channel >= 210) &
+        (s_channel <= 100)
+    )
+    yellow_mask = (
+        (h_channel >= 15) &
+        (h_channel <= 35) &
+        (l_channel >= 100) &
         (s_channel >= 100)
-    ] = 1
+    )
+
+    color_binary = np.zeros_like(gray, dtype=np.uint8)
+    color_binary[white_mask | yellow_mask] = 1
 
     combined_binary = np.zeros_like(gray, dtype=np.uint8)
     combined_binary[
@@ -137,7 +149,7 @@ def perspective_transform(binary_image):
 
     return warped, transform_matrix, inverse_transform_matrix
 
-def find_lane_pixels(binary_warped, number_of_windows=9, margin=80, min_pixels=50):
+def find_lane_pixels(binary_warped, number_of_windows=9, margin=70, min_pixels=50):
     histogram = np.sum(
         binary_warped[binary_warped.shape[0] // 2:, :],
         axis=0
@@ -325,6 +337,142 @@ def draw_lane_overlay(
 
     return result
 
+class LaneTracker:
+    def __init__(self, history_size=5):
+        self.history_size = history_size
+        self.left_fits = []
+        self.right_fits = []
+
+    def update(self, left_fit, right_fit):
+        self.left_fits.append(left_fit)
+        self.right_fits.append(right_fit)
+        self.left_fits = self.left_fits[-self.history_size:]
+        self.right_fits = self.right_fits[-self.history_size:]
+
+        return (
+            np.mean(self.left_fits, axis=0),
+            np.mean(self.right_fits, axis=0)
+        )
+
+def process_frame(
+    image,
+    camera_matrix,
+    distortion_coeffs,
+    tracker=None,
+    return_steps=False
+):
+    undistorted = undistort_image(
+        image,
+        camera_matrix,
+        distortion_coeffs
+    )
+    binary = create_binary_image(undistorted)
+    warped, _, inverse_matrix = perspective_transform(binary)
+
+    left_x, left_y, right_x, right_y, lane_pixel_image = \
+        find_lane_pixels(warped)
+
+    left_fit, right_fit, _, _, _ = fit_lane_polynomials(
+        left_x,
+        left_y,
+        right_x,
+        right_y,
+        warped.shape[0]
+    )
+
+    if tracker is not None:
+        left_fit, right_fit = tracker.update(left_fit, right_fit)
+
+    curvature, vehicle_offset = calculate_curvature_and_offset(
+        left_fit,
+        right_fit,
+        warped.shape
+    )
+
+    result = draw_lane_overlay(
+        undistorted,
+        warped,
+        left_fit,
+        right_fit,
+        inverse_matrix,
+        curvature,
+        vehicle_offset
+    )
+
+    if return_steps:
+        return result, {
+            "undistorted": undistorted,
+            "binary": binary,
+            "warped": warped,
+            "lane_pixels": lane_pixel_image
+        }
+
+    return result
+
+def process_video(
+    input_path,
+    output_path,
+    camera_matrix,
+    distortion_coeffs,
+    maximum_frames=None
+):
+    capture = cv2.VideoCapture(input_path)
+    if not capture.isOpened():
+        raise RuntimeError(f"Could not open video: {input_path}")
+
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = capture.get(cv2.CAP_PROP_FPS) or 25
+    writer = cv2.VideoWriter(
+        output_path,
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height)
+    )
+
+    if not writer.isOpened():
+        capture.release()
+        raise RuntimeError(f"Could not create video: {output_path}")
+
+    tracker = LaneTracker()
+    frame_count = 0
+    failed_frames = 0
+
+    while maximum_frames is None or frame_count < maximum_frames:
+        success, frame = capture.read()
+        if not success:
+            break
+
+        try:
+            result = process_frame(
+                frame,
+                camera_matrix,
+                distortion_coeffs,
+                tracker=tracker
+            )
+        except ValueError as error:
+            failed_frames += 1
+            result = frame.copy()
+            cv2.putText(
+                result,
+                f"Lane detection failed: {error}",
+                (30, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2
+            )
+
+        writer.write(result)
+        frame_count += 1
+
+    capture.release()
+    writer.release()
+    print(
+        f"Saved video: {output_path} "
+        f"({frame_count} frames, {failed_frames} failed)"
+    )
+
 def main():
     for file_name in sorted(os.listdir(camera_cal_dir)):
         if file_name.lower().endswith((".jpg", ".jpeg")):
@@ -335,6 +483,8 @@ def main():
                 image_list.append((file_name, img))
 
     camera_matrix, distortion_coeffs = calibrate_camera(image_list)
+
+    os.makedirs(rnd_tests_output_dir, exist_ok=True)
 
     # Test the pipeline with a color road image from examples.
     test_image_path = os.path.join(test_images_dir, "challange00101.jpg")
@@ -349,6 +499,7 @@ def main():
         camera_matrix,
         distortion_coeffs
     )
+    original_vs_undistorted = np.hstack((img, corrected))
 
     binary = create_binary_image(corrected)
     warped_binary, _, inverse_transform_matrix = perspective_transform(binary)
@@ -403,11 +554,14 @@ def main():
         4
     )
 
-    os.makedirs(rnd_tests_output_dir, exist_ok=True)
     # one example for each processing step
     undistorted_path = os.path.join(
         rnd_tests_output_dir,
         "undistorted_example.jpg"
+    )
+    comparison_path = os.path.join(
+        rnd_tests_output_dir,
+        "original_vs_undistorted_example.jpg"
     )
     binary_path = os.path.join(
         rnd_tests_output_dir,
@@ -430,8 +584,29 @@ def main():
         "final_lane_example.jpg"
     )
 
+    custom_image_path = os.path.join(
+        test_images_dir,
+        "custom_test1.jpg"
+    )
+    custom_image_output_path = os.path.join(
+        rnd_tests_output_dir,
+        "custom_test1_output.jpg"
+    )
+    custom_output = process_frame(
+        cv2.imread(custom_image_path),
+        camera_matrix,
+        distortion_coeffs
+    )
+
+    if not cv2.imwrite(custom_image_output_path, custom_output):
+        raise RuntimeError(f"Could not save image: {custom_image_output_path}")
+
     if not cv2.imwrite(undistorted_path, corrected):
         raise RuntimeError(f"Could not save image: {undistorted_path}")
+
+    if not cv2.imwrite(comparison_path, original_vs_undistorted):
+        raise RuntimeError(f"Could not save image: {comparison_path}")
+
     # * 255 to see diff
     if not cv2.imwrite(binary_path, binary * 255):
         raise RuntimeError(f"Could not save image: {binary_path}")
@@ -449,6 +624,7 @@ def main():
         raise RuntimeError(f"Could not save image: {final_lane_path}")
 
     print(f"Saved undistorted image: {undistorted_path}")
+    print(f"Saved original vs undistorted image: {comparison_path}")
     print(f"Saved binary image: {binary_path}")
     print(f"Saved warped binary image: {warped_path}")
     print(f"Saved lane pixel image: {lane_pixels_path}")
@@ -467,6 +643,18 @@ def main():
     print("Distortion coefficients:")
     print(distortion_coeffs)
 
+    # process_video(
+    #     os.path.join(test_videos_dir, "challenge03.mp4"),
+    #     os.path.join(rnd_tests_output_dir, "challenge03_output.mp4"),
+    #     camera_matrix,
+    #     distortion_coeffs
+    # )
+    # process_video(
+    #     os.path.join(test_videos_dir, "project_video03.mp4"),
+    #     os.path.join(rnd_tests_output_dir, "project_video03_output.mp4"),
+    #     camera_matrix,
+    #     distortion_coeffs
+    # )
 
 if __name__ == "__main__":
     main()
