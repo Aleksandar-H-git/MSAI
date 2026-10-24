@@ -90,7 +90,7 @@ def create_binary_image(image):
 
     gradient_binary = np.zeros_like(gray, dtype=np.uint8)
     gradient_binary[
-        (scaled_sobel >= 20)
+        (scaled_sobel >= 40) & (scaled_sobel <= 180)
     ] = 1
 
     white_mask = (
@@ -109,7 +109,8 @@ def create_binary_image(image):
 
     combined_binary = np.zeros_like(gray, dtype=np.uint8)
     combined_binary[
-        (gradient_binary == 1) | (color_binary == 1)
+        (color_binary == 1) |
+        ((gradient_binary == 1) & (l_channel >= 160))
     ] = 1
 
     return combined_binary
@@ -155,9 +156,19 @@ def find_lane_pixels(binary_warped, number_of_windows=9, margin=70, min_pixels=5
         axis=0
     )
     midpoint = histogram.shape[0] // 2
-    left_base = int(np.argmax(histogram[:midpoint]))
-    right_base = int(np.argmax(histogram[midpoint:]) + midpoint)
+    width = histogram.shape[0]
 
+    left_min = int(width * 0.10)
+    left_max = int(width * 0.50)
+    right_min = int(width * 0.50)
+    right_max = int(width * 0.90)
+
+    left_base = int(
+        np.argmax(histogram[left_min:left_max]) + left_min
+    )
+    right_base = int(
+        np.argmax(histogram[right_min:right_max]) + right_min
+    )
     window_height = binary_warped.shape[0] // number_of_windows
     nonzero_y, nonzero_x = binary_warped.nonzero()
     left_current = left_base
@@ -225,8 +236,40 @@ def find_lane_pixels(binary_warped, number_of_windows=9, margin=70, min_pixels=5
 
     return left_x, left_y, right_x, right_y, debug_image
 
+def find_lane_pixels_near_fit(
+    binary_warped,
+    left_fit,
+    right_fit,
+    margin=80
+):
+    nonzero_y, nonzero_x = binary_warped.nonzero()
+    left_position = np.polyval(left_fit, nonzero_y)
+    right_position = np.polyval(right_fit, nonzero_y)
+
+    left_indices = (
+        (nonzero_x >= left_position - margin) &
+        (nonzero_x <= left_position + margin)
+    )
+    right_indices = (
+        (nonzero_x >= right_position - margin) &
+        (nonzero_x <= right_position + margin)
+    )
+
+    left_x = nonzero_x[left_indices]
+    left_y = nonzero_y[left_indices]
+    right_x = nonzero_x[right_indices]
+    right_y = nonzero_y[right_indices]
+
+    debug_image = np.dstack(
+        (binary_warped, binary_warped, binary_warped)
+    ) * 255
+    debug_image[left_y, left_x] = (255, 0, 0)
+    debug_image[right_y, right_x] = (0, 0, 255)
+
+    return left_x, left_y, right_x, right_y, debug_image
+
 def fit_lane_polynomials(left_x, left_y, right_x, right_y, image_height):
-    if len(left_x) < 300 or len(right_x) < 300:
+    if len(left_x) < 200 or len(right_x) < 200:
         raise ValueError(
             f"Not enough lane pixels: left={len(left_x)}, right={len(right_x)}"
         )
@@ -285,6 +328,38 @@ def calculate_curvature_and_offset(left_fit, right_fit, image_shape):
 
     return average_curvature, vehicle_offset
 
+def validate_lane_fit(
+    left_fit,
+    right_fit,
+    image_shape,
+    previous_fits=None
+):
+    height, width = image_shape[:2]
+    check_y = np.array([0, height - 1])
+    left_x = np.polyval(left_fit, check_y)
+    right_x = np.polyval(right_fit, check_y)
+    lane_widths = right_x - left_x
+
+    if np.any(lane_widths < width * 0.20) or \
+            np.any(lane_widths > width * 0.80):
+        raise ValueError("Detected lane width is unrealistic.")
+
+    if abs(lane_widths[1] - lane_widths[0]) > width * 0.25:
+        raise ValueError("Lane boundaries are not approximately parallel.")
+
+    lane_center = (left_x[-1] + right_x[-1]) / 2
+    if abs(lane_center - width / 2) > width * 0.35:
+        raise ValueError("Detected lane position is unrealistic.")
+
+    if previous_fits is not None:
+        previous_left, previous_right = previous_fits
+        previous_center = (
+            np.polyval(previous_left, height - 1) +
+            np.polyval(previous_right, height - 1)
+        ) / 2
+        if abs(lane_center - previous_center) > width * 0.15:
+            raise ValueError("Lane position changed too quickly.")
+
 def draw_lane_overlay(
     undistorted,
     binary_warped,
@@ -338,21 +413,39 @@ def draw_lane_overlay(
     return result
 
 class LaneTracker:
-    def __init__(self, history_size=5):
+    def __init__(self, history_size=5, maximum_reuse_frames=5):
         self.history_size = history_size
+        self.maximum_reuse_frames = maximum_reuse_frames
         self.left_fits = []
         self.right_fits = []
+        self.failed_frames = 0
+
+    def has_fit(self):
+        return bool(self.left_fits and self.right_fits)
+
+    def current_fits(self):
+        return (
+            np.mean(self.left_fits, axis=0),
+            np.mean(self.right_fits, axis=0)
+        )
+
+    def can_reuse(self):
+        return (
+            self.has_fit() and
+            self.failed_frames < self.maximum_reuse_frames
+        )
+
+    def mark_failure(self):
+        self.failed_frames += 1
 
     def update(self, left_fit, right_fit):
         self.left_fits.append(left_fit)
         self.right_fits.append(right_fit)
         self.left_fits = self.left_fits[-self.history_size:]
         self.right_fits = self.right_fits[-self.history_size:]
+        self.failed_frames = 0
 
-        return (
-            np.mean(self.left_fits, axis=0),
-            np.mean(self.right_fits, axis=0)
-        )
+        return self.current_fits()
 
 def process_frame(
     image,
@@ -369,25 +462,63 @@ def process_frame(
     binary = create_binary_image(undistorted)
     warped, _, inverse_matrix = perspective_transform(binary)
 
-    left_x, left_y, right_x, right_y, lane_pixel_image = \
-        find_lane_pixels(warped)
+    previous_fits = None
+    if tracker is not None and tracker.can_reuse():
+        previous_fits = tracker.current_fits()
 
-    left_fit, right_fit, _, _, _ = fit_lane_polynomials(
-        left_x,
-        left_y,
-        right_x,
-        right_y,
-        warped.shape[0]
-    )
+    try:
+        if previous_fits is None:
+            lane_pixels = find_lane_pixels(warped)
+        else:
+            lane_pixels = find_lane_pixels_near_fit(
+                warped,
+                previous_fits[0],
+                previous_fits[1]
+            )
 
-    if tracker is not None:
-        left_fit, right_fit = tracker.update(left_fit, right_fit)
+        left_x, left_y, right_x, right_y, lane_pixel_image = lane_pixels
+        left_fit, right_fit, _, _, _ = fit_lane_polynomials(
+            left_x,
+            left_y,
+            right_x,
+            right_y,
+            warped.shape[0]
+        )
+        validate_lane_fit(
+            left_fit,
+            right_fit,
+            warped.shape,
+            previous_fits
+        )
+        curvature, vehicle_offset = calculate_curvature_and_offset(
+            left_fit,
+            right_fit,
+            warped.shape
+        )
+        if np.isnan(curvature) or curvature < 20:
+            raise ValueError("Detected lane curvature is unrealistic.")
+        if not np.isfinite(vehicle_offset) or abs(vehicle_offset) > 2.5:
+            raise ValueError("Detected vehicle position is unrealistic.")
 
-    curvature, vehicle_offset = calculate_curvature_and_offset(
-        left_fit,
-        right_fit,
-        warped.shape
-    )
+        if tracker is not None:
+            left_fit, right_fit = tracker.update(left_fit, right_fit)
+            curvature, vehicle_offset = calculate_curvature_and_offset(
+                left_fit,
+                right_fit,
+                warped.shape
+            )
+    except ValueError:
+        if tracker is None or not tracker.can_reuse():
+            raise
+
+        tracker.mark_failure()
+        left_fit, right_fit = tracker.current_fits()
+        curvature, vehicle_offset = calculate_curvature_and_offset(
+            left_fit,
+            right_fit,
+            warped.shape
+        )
+        lane_pixel_image = np.dstack((warped, warped, warped)) * 255
 
     result = draw_lane_overlay(
         undistorted,
@@ -450,17 +581,12 @@ def process_video(
                 distortion_coeffs,
                 tracker=tracker
             )
-        except ValueError as error:
+        except ValueError:
             failed_frames += 1
-            result = frame.copy()
-            cv2.putText(
-                result,
-                f"Lane detection failed: {error}",
-                (30, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 0, 255),
-                2
+            result = undistort_image(
+                frame,
+                camera_matrix,
+                distortion_coeffs
             )
 
         writer.write(result)
@@ -486,13 +612,14 @@ def main():
 
     os.makedirs(rnd_tests_output_dir, exist_ok=True)
 
-    # Test the pipeline with a color road image from examples.
-    test_image_path = os.path.join(test_images_dir, "challange00101.jpg")
+    test_image_path = os.path.join(test_images_dir, "custom_test2.jpg")
 
     img = cv2.imread(test_image_path)
 
     if img is None:
         raise RuntimeError(f"Could not load image: {test_image_path}")
+
+    img = cv2.resize(img, (1280, 720))
 
     corrected = undistort_image(
         img,
@@ -554,7 +681,6 @@ def main():
         4
     )
 
-    # one example for each processing step
     undistorted_path = os.path.join(
         rnd_tests_output_dir,
         "undistorted_example.jpg"
@@ -583,23 +709,6 @@ def main():
         rnd_tests_output_dir,
         "final_lane_example.jpg"
     )
-
-    custom_image_path = os.path.join(
-        test_images_dir,
-        "custom_test1.jpg"
-    )
-    custom_image_output_path = os.path.join(
-        rnd_tests_output_dir,
-        "custom_test1_output.jpg"
-    )
-    custom_output = process_frame(
-        cv2.imread(custom_image_path),
-        camera_matrix,
-        distortion_coeffs
-    )
-
-    if not cv2.imwrite(custom_image_output_path, custom_output):
-        raise RuntimeError(f"Could not save image: {custom_image_output_path}")
 
     if not cv2.imwrite(undistorted_path, corrected):
         raise RuntimeError(f"Could not save image: {undistorted_path}")
@@ -643,18 +752,42 @@ def main():
     print("Distortion coefficients:")
     print(distortion_coeffs)
 
-    # process_video(
-    #     os.path.join(test_videos_dir, "challenge03.mp4"),
-    #     os.path.join(rnd_tests_output_dir, "challenge03_output.mp4"),
-    #     camera_matrix,
-    #     distortion_coeffs
-    # )
-    # process_video(
-    #     os.path.join(test_videos_dir, "project_video03.mp4"),
-    #     os.path.join(rnd_tests_output_dir, "project_video03_output.mp4"),
-    #     camera_matrix,
-    #     distortion_coeffs
-    # )
+    process_video(
+        os.path.join(test_videos_dir, "challenge01.mp4"),
+        os.path.join(rnd_tests_output_dir, "challenge01_output.mp4"),
+        camera_matrix,
+        distortion_coeffs
+    )
+    process_video(
+        os.path.join(test_videos_dir, "challenge02.mp4"),
+        os.path.join(rnd_tests_output_dir, "challenge02_output.mp4"),
+        camera_matrix,
+        distortion_coeffs
+    )
+    process_video(
+        os.path.join(test_videos_dir, "challenge03.mp4"),
+        os.path.join(rnd_tests_output_dir, "challenge03_output.mp4"),
+        camera_matrix,
+        distortion_coeffs
+    )
+    process_video(
+        os.path.join(test_videos_dir, "project_video03.mp4"),
+        os.path.join(rnd_tests_output_dir, "project_video03_output.mp4"),
+        camera_matrix,
+        distortion_coeffs
+    )
+    process_video(
+        os.path.join(test_videos_dir, "project_video02.mp4"),
+        os.path.join(rnd_tests_output_dir, "project_video02_output.mp4"),
+        camera_matrix,
+        distortion_coeffs
+    )
+    process_video(
+        os.path.join(test_videos_dir, "project_video01.mp4"),
+        os.path.join(rnd_tests_output_dir, "project_video01_output.mp4"),
+        camera_matrix,
+        distortion_coeffs
+    )
 
 if __name__ == "__main__":
     main()
