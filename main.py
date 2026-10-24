@@ -227,6 +227,104 @@ def fit_lane_polynomials(left_x, left_y, right_x, right_y, image_height):
 
     return left_fit, right_fit, plot_y, left_fit_x, right_fit_x
 
+def calculate_curvature_and_offset(left_fit, right_fit, image_shape):
+    height, width = image_shape[:2]
+    plot_y = np.linspace(0, height - 1, height)
+    left_fit_x = np.polyval(left_fit, plot_y)
+    right_fit_x = np.polyval(right_fit, plot_y)
+
+    lane_width_pixels = right_fit_x[-1] - left_fit_x[-1]
+    if lane_width_pixels <= 0:
+        raise ValueError("The detected lane width is invalid.")
+
+    y_meters_per_pixel = 30 / height
+    x_meters_per_pixel = 3.7 / lane_width_pixels
+    y_in_meters = plot_y * y_meters_per_pixel
+
+    left_fit_meters = np.polyfit(
+        y_in_meters,
+        left_fit_x * x_meters_per_pixel,
+        2
+    )
+    right_fit_meters = np.polyfit(
+        y_in_meters,
+        right_fit_x * x_meters_per_pixel,
+        2
+    )
+    y_evaluation = (height - 1) * y_meters_per_pixel
+
+    def curvature(fit):
+        denominator = abs(2 * fit[0])
+        if denominator < 1e-9:
+            return float("inf")
+        return (
+            (1 + (2 * fit[0] * y_evaluation + fit[1]) ** 2) ** 1.5
+        ) / denominator
+
+    left_curvature = curvature(left_fit_meters)
+    right_curvature = curvature(right_fit_meters)
+    average_curvature = (left_curvature + right_curvature) / 2
+
+    lane_center = (left_fit_x[-1] + right_fit_x[-1]) / 2
+    image_center = width / 2
+    vehicle_offset = (
+        image_center - lane_center
+    ) * x_meters_per_pixel
+
+    return average_curvature, vehicle_offset
+
+def draw_lane_overlay(
+    undistorted,
+    binary_warped,
+    left_fit,
+    right_fit,
+    inverse_transform_matrix,
+    curvature,
+    vehicle_offset
+):
+    height, width = binary_warped.shape[:2]
+    plot_y = np.linspace(0, height - 1, height)
+    left_fit_x = np.polyval(left_fit, plot_y)
+    right_fit_x = np.polyval(right_fit, plot_y)
+
+    color_warp = np.zeros((height, width, 3), dtype=np.uint8)
+    left_points = np.column_stack((left_fit_x, plot_y))
+    right_points = np.flipud(
+        np.column_stack((right_fit_x, plot_y))
+    )
+    lane_points = np.vstack((left_points, right_points)).astype(np.int32)
+    cv2.fillPoly(color_warp, [lane_points], (0, 255, 0))
+
+    road_overlay = cv2.warpPerspective(
+        color_warp,
+        inverse_transform_matrix,
+        (width, height)
+    )
+    result = cv2.addWeighted(undistorted, 1, road_overlay, 0.3, 0)
+
+    cv2.putText(
+        result,
+        f"Lane curvature: {curvature:.0f} m",
+        (40, 60),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (255, 255, 255),
+        2
+    )
+
+    side = "right" if vehicle_offset > 0 else "left"
+    cv2.putText(
+        result,
+        f"Vehicle offset: {abs(vehicle_offset):.2f} m {side} of center",
+        (40, 105),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (255, 255, 255),
+        2
+    )
+
+    return result
+
 def main():
     for file_name in sorted(os.listdir(camera_cal_dir)):
         if file_name.lower().endswith((".jpg", ".jpeg")):
@@ -282,6 +380,21 @@ def main():
         (0, 255, 255),
         4
     )
+
+    curvature, vehicle_offset = calculate_curvature_and_offset(
+        left_fit,
+        right_fit,
+        warped_binary.shape
+    )
+    final_lane_image = draw_lane_overlay(
+        corrected,
+        warped_binary,
+        left_fit,
+        right_fit,
+        inverse_transform_matrix,
+        curvature,
+        vehicle_offset
+    )
     cv2.polylines(
         fitted_lane_image,
         [right_points],
@@ -291,7 +404,7 @@ def main():
     )
 
     os.makedirs(rnd_tests_output_dir, exist_ok=True)
-
+    # one example for each processing step
     undistorted_path = os.path.join(
         rnd_tests_output_dir,
         "undistorted_example.jpg"
@@ -312,6 +425,10 @@ def main():
         rnd_tests_output_dir,
         "fitted_lane_example.jpg"
     )
+    final_lane_path = os.path.join(
+        rnd_tests_output_dir,
+        "final_lane_example.jpg"
+    )
 
     if not cv2.imwrite(undistorted_path, corrected):
         raise RuntimeError(f"Could not save image: {undistorted_path}")
@@ -328,15 +445,21 @@ def main():
     if not cv2.imwrite(fitted_lane_path, fitted_lane_image):
         raise RuntimeError(f"Could not save image: {fitted_lane_path}")
 
+    if not cv2.imwrite(final_lane_path, final_lane_image):
+        raise RuntimeError(f"Could not save image: {final_lane_path}")
+
     print(f"Saved undistorted image: {undistorted_path}")
     print(f"Saved binary image: {binary_path}")
     print(f"Saved warped binary image: {warped_path}")
     print(f"Saved lane pixel image: {lane_pixels_path}")
     print(f"Saved fitted lane image: {fitted_lane_path}")
+    print(f"Saved final lane image: {final_lane_path}")
     print(f"Left lane pixels found: {len(left_x)}")
     print(f"Right lane pixels found: {len(right_x)}")
     print(f"Left polynomial: {left_fit}")
     print(f"Right polynomial: {right_fit}")
+    print(f"Lane curvature: {curvature:.2f} m")
+    print(f"Vehicle offset: {vehicle_offset:.2f} m")
 
     print("Camera matrix:")
     print(camera_matrix)
