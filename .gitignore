@@ -7,3 +7,5 @@ test_videos/
 examples/
 venv/
 my_tests/
+__pycache__
+main_test.py

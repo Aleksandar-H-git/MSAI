@@ -137,6 +137,82 @@ def perspective_transform(binary_image):
 
     return warped, transform_matrix, inverse_transform_matrix
 
+def find_lane_pixels(binary_warped, number_of_windows=9, margin=80, min_pixels=50):
+    histogram = np.sum(
+        binary_warped[binary_warped.shape[0] // 2:, :],
+        axis=0
+    )
+    midpoint = histogram.shape[0] // 2
+    left_base = int(np.argmax(histogram[:midpoint]))
+    right_base = int(np.argmax(histogram[midpoint:]) + midpoint)
+
+    window_height = binary_warped.shape[0] // number_of_windows
+    nonzero_y, nonzero_x = binary_warped.nonzero()
+    left_current = left_base
+    right_current = right_base
+    left_lane_indices = []
+    right_lane_indices = []
+
+    debug_image = np.dstack(
+        (binary_warped, binary_warped, binary_warped)
+    ) * 255
+
+    for window in range(number_of_windows):
+        y_low = binary_warped.shape[0] - (window + 1) * window_height
+        y_high = binary_warped.shape[0] - window * window_height
+        left_x_low = left_current - margin
+        left_x_high = left_current + margin
+        right_x_low = right_current - margin
+        right_x_high = right_current + margin
+
+        cv2.rectangle(
+            debug_image,
+            (left_x_low, y_low),
+            (left_x_high, y_high),
+            (0, 255, 0),
+            2
+        )
+        cv2.rectangle(
+            debug_image,
+            (right_x_low, y_low),
+            (right_x_high, y_high),
+            (0, 255, 0),
+            2
+        )
+
+        left_indices = (
+            (nonzero_y >= y_low)
+            & (nonzero_y < y_high)
+            & (nonzero_x >= left_x_low)
+            & (nonzero_x < left_x_high)
+        ).nonzero()[0]
+        right_indices = (
+            (nonzero_y >= y_low)
+            & (nonzero_y < y_high)
+            & (nonzero_x >= right_x_low)
+            & (nonzero_x < right_x_high)
+        ).nonzero()[0]
+
+        left_lane_indices.append(left_indices)
+        right_lane_indices.append(right_indices)
+
+        if len(left_indices) > min_pixels:
+            left_current = int(np.mean(nonzero_x[left_indices]))
+        if len(right_indices) > min_pixels:
+            right_current = int(np.mean(nonzero_x[right_indices]))
+
+    left_lane_indices = np.concatenate(left_lane_indices)
+    right_lane_indices = np.concatenate(right_lane_indices)
+    left_x = nonzero_x[left_lane_indices]
+    left_y = nonzero_y[left_lane_indices]
+    right_x = nonzero_x[right_lane_indices]
+    right_y = nonzero_y[right_lane_indices]
+
+    debug_image[left_y, left_x] = (255, 0, 0)
+    debug_image[right_y, right_x] = (0, 0, 255)
+
+    return left_x, left_y, right_x, right_y, debug_image
+
 def main():
     for file_name in sorted(os.listdir(camera_cal_dir)):
         if file_name.lower().endswith((".jpg", ".jpeg")):
@@ -164,6 +240,8 @@ def main():
 
     binary = create_binary_image(corrected)
     warped_binary, _, inverse_transform_matrix = perspective_transform(binary)
+    left_x, left_y, right_x, right_y, lane_pixels_image = \
+        find_lane_pixels(warped_binary)
 
     os.makedirs(rnd_tests_output_dir, exist_ok=True)
 
@@ -179,6 +257,10 @@ def main():
         rnd_tests_output_dir,
         "warped_binary_example.jpg"
     )
+    lane_pixels_path = os.path.join(
+        rnd_tests_output_dir,
+        "lane_pixels_example.jpg"
+    )
 
     if not cv2.imwrite(undistorted_path, corrected):
         raise RuntimeError(f"Could not save image: {undistorted_path}")
@@ -189,9 +271,15 @@ def main():
     if not cv2.imwrite(warped_path, warped_binary * 255):
         raise RuntimeError(f"Could not save image: {warped_path}")
 
+    if not cv2.imwrite(lane_pixels_path, lane_pixels_image):
+        raise RuntimeError(f"Could not save image: {lane_pixels_path}")
+
     print(f"Saved undistorted image: {undistorted_path}")
     print(f"Saved binary image: {binary_path}")
     print(f"Saved warped binary image: {warped_path}")
+    print(f"Saved lane pixel image: {lane_pixels_path}")
+    print(f"Left lane pixels found: {len(left_x)}")
+    print(f"Right lane pixels found: {len(right_x)}")
 
     print("Camera matrix:")
     print(camera_matrix)
